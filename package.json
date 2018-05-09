@@ -1,42 +1,74 @@
 {
+  "_from": "git+https://github.com/BitcoinInterestOfficial/node-stratum-pool-bci.git",
+  "_id": "stratum-pool@0.1.6",
+  "_inBundle": false,
+  "_location": "/stratum-pool",
+  "_phantomChildren": {},
+  "_requested": {
+    "type": "git",
+    "raw": "stratum-pool@git+https://github.com/BitcoinInterestOfficial/node-stratum-pool-bci.git",
     "name": "stratum-pool",
-    "version": "0.1.6",
-    "description": "High performance Stratum poolserver in Node.js",
-    "keywords": [
-        "stratum",
-        "mining",
-        "pool",
-        "server",
-        "poolserver",
-        "bitcoin",
-        "litecoin",
-        "scrypt"
-    ],
-    "homepage": "https://github.com/joshuayabut/node-stratum-pool",
-    "bugs": {
-        "url": "https://github.com/joshuayabut/node-stratum-pool/issues"
+    "escapedName": "stratum-pool",
+    "rawSpec": "git+https://github.com/BitcoinInterestOfficial/node-stratum-pool-bci.git",
+    "saveSpec": "git+https://github.com/BitcoinInterestOfficial/node-stratum-pool-bci.git",
+    "fetchSpec": "https://github.com/BitcoinInterestOfficial/node-stratum-pool-bci.git",
+    "gitCommittish": null
+  },
+  "_requiredBy": [
+    "/"
+  ],
+  "_resolved": "git+https://github.com/BitcoinInterestOfficial/node-stratum-pool-bci.git#c66ba109e7de88edc46dd70f36aa9c7cea7d7add",
+  "_spec": "stratum-pool@git+https://github.com/BitcoinInterestOfficial/node-stratum-pool-bci.git",
+  "_where": "/home/bcinode2/z-nomp-bitcoin-interest",
+  "author": {
+    "name": "Matthew Little"
+  },
+  "bugs": {
+    "url": "https://github.com/BitcoinInterestOfficial/node-stratum-pool-bci/issues"
+  },
+  "bundleDependencies": false,
+  "contributors": [
+    {
+      "name": "vekexasia"
     },
-    "license": "GPL-2.0",
-    "author": "Matthew Little",
-    "contributors": [
-        "vekexasia",
-        "TheSeven"
-    ],
-    "main": "lib/index.js",
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/joshuayabut/node-stratum-pool.git"
+    {
+      "name": "TheSeven"
     },
-    "dependencies": {
-        "equihashverify": "git+https://github.com/zencashofficial/equihashverify.git",
-        "bignum": "*",
-        "base58-native": "*",
-        "async": "*",
-        "merkle-bitcoin": "git+https://github.com/joshuayabut/merkle-bitcoin.git",
-        "bitcoinjs-lib-zcash": "git+https://github.com/runn1ng/bitcoinjs-lib.git#zcash",
-        "promise": "*"
-    },
-    "engines": {
-        "node": ">=7"
+    {
+      "name": "fellu"
     }
+  ],
+  "dependencies": {
+    "async": "*",
+    "base58-native": "*",
+    "bignum": "*",
+    "bitcoinjs-lib-zcash": "git+https://github.com/runn1ng/bitcoinjs-lib.git#zcash",
+    "equihashverify": "git+https://github.com/ZencashOfficial/equihashverify.git",
+    "merkle-bitcoin": "git+https://github.com/joshuayabut/merkle-bitcoin.git",
+    "promise": "*"
+  },
+  "deprecated": false,
+  "description": "High performance Stratum poolserver in Node.js",
+  "engines": {
+    "node": ">=7"
+  },
+  "homepage": "https://github.com/BitcoinInterestOfficial/node-stratum-pool-bci",
+  "keywords": [
+    "stratum",
+    "mining",
+    "pool",
+    "server",
+    "poolserver",
+    "bitcoin",
+    "litecoin",
+    "scrypt"
+  ],
+  "license": "GPL-2.0",
+  "main": "lib/index.js",
+  "name": "stratum-pool",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BitcoinInterestOfficial/node-stratum-pool-bci.git"
+  },
+  "version": "0.1.6"
 }
