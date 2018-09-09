@@ -1,4 +1,4 @@
-High performance Stratum poolserver for equihash in Node.js. One instance of this software can startup and manage multiple coin
+High performance Stratum poolserver for bci/progpow in Node.js. One instance of this software can startup and manage multiple coin
 pools, each with their own daemon and stratum port :)
 
 #### Notice

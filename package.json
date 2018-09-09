@@ -36,15 +36,19 @@
     },
     {
       "name": "fellu"
+    },
+    {
+      "name": "anduck"
     }
   ],
   "dependencies": {
     "async": "*",
     "base58-native": "*",
     "bignum": "*",
-    "bitcoinjs-lib-zcash": "git+https://github.com/runn1ng/bitcoinjs-lib.git#zcash",
+    "bitcoinjs-lib": "git+https://github.com/bitcoinjs/bitcoinjs-lib.git",
     "equihashverify": "git+https://github.com/ZencashOfficial/equihashverify.git",
     "merkle-bitcoin": "git+https://github.com/joshuayabut/merkle-bitcoin.git",
+    "sha3": "git+https://github.com/phusion/node-sha3.git",
     "promise": "*"
   },
   "deprecated": false,
