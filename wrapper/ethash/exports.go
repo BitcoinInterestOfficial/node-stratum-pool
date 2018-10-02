@@ -15,6 +15,11 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 package ethash
+import
+(
+    "hash"
+)
+
 
 // exports.go exports internal functions for external usage
 
@@ -36,14 +41,23 @@ func Export_generateCache(dest []uint32, epoch uint64, seed []byte) {
 }
 
 func Export_progpowLight(size uint64, cache []uint32, hash []byte,
-            nonce uint64, blockNumber uint64) ([]byte, []byte) {
-    return progpowLight(size, cache, hash, nonce, blockNumber);
+            nonce uint64, blockNumber uint64, cDag []uint32) ([]byte, []byte) {
+    return progpowLight(size, cache, hash, nonce, blockNumber, cDag)
 }
 
 func Export_keccakF800Long(headerHash []byte, nonce uint64, result []uint32) []byte {
-    return keccakF800Long(headerHash, nonce, result);
+    return keccakF800Long(headerHash, nonce, result)
 }
 
 func Export_keccakF800Short(headerHash []byte, nonce uint64, result []uint32) uint64 {
-    return keccakF800Short(headerHash, nonce, result);
+    return keccakF800Short(headerHash, nonce, result)
 }
+
+func Export_makeHasher(h hash.Hash) Hasher {
+    return makeHasher(h)
+}
+
+func Export_generateDatasetItem(cache []uint32, index uint32, keccak512 Hasher) []byte {
+    return generateDatasetItem(cache, index, keccak512)
+}
+

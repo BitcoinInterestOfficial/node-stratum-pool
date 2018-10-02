@@ -1,4 +1,4 @@
-// ProgPoW Ethash JSON wrapper v0.2 (2018-09-07)
+// ProgPoW Ethash JSON wrapper v0.4 (2018-10-02)
 // Copyright (C) 2018  Antti Majakivi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -29,12 +29,16 @@ import (
     "fmt"
     "log"
     "os"
+    "time"
+    "github.com/ethereum/go-ethereum/crypto/sha3"
 )
 
 //consts
-const HTTP_HOST_PORT_DEFAULT        string = "localhost:8700"
-const SKIP_MIXHASH_CHECK_DEFAULT    bool   = false
-const VERSION_STRING                string = "v0.2 (2018-09-07)"
+const HTTP_HOST_PORT_DEFAULT        string = "localhost:8700"   	//host and port for http server
+const SKIP_MIXHASH_CHECK_DEFAULT    bool   = false					//true = skips user-given mixhash checking
+const VERSION_STRING                string = "v0.4 (2018-10-02)"
+const progpowCacheWords             uint32 = 4 * 1024               // Total size 16*1024 bytes
+
 
 //globals
 var epochNumber         uint64
@@ -42,8 +46,12 @@ var cacheSize           uint64
 var datasetSize         uint64
 var seedHash            []byte
 var cache               []uint32
+var keccak512           ethash.Hasher
+var rawData             []byte
+var cDag                []uint32
+
 var skip_mixhash_check  bool        = SKIP_MIXHASH_CHECK_DEFAULT
-    
+var generating_cache    bool = false
 
 //JSON response struct
 type JsonResult struct {
@@ -82,8 +90,12 @@ func apiNewEpoch(w http.ResponseWriter, r *http.Request) {
     //initiate json response struct as false result
     json_result := JsonResult{Result: false}
     
-    //if it's the same we already had, skip making new cache etc. and return true immediately
-    if get_epoch_number == epochNumber {
+    //check if we're generating a cache already
+    if (generating_cache) {
+        json_result.Result = false
+        json_result.Info = "already generating cache"
+    } else if get_epoch_number == epochNumber {
+        //if it's the same we already had, skip making new cache etc. and return true immediately
         json_result.Result = true
     } else {
         //run newEpoch to generate new cache and set parameters to correct values
@@ -174,12 +186,20 @@ func apiLightVerifyProgpow(w http.ResponseWriter, r *http.Request) {
     json_result := JsonResult{Result: false, Digest: "", MixHash: "", Info: "", Block: false}
     
     //if it's the same we already had, skip making new cache
-    if get_epoch_number != epochNumber {
-        //run newEpoch to generate new cache and set parameters to correct values
-        res := newEpoch(get_epoch_number)
-        if (res == false) {
-            json.NewEncoder(w).Encode("error: failed run newEpoch")
-            return;
+    if (get_epoch_number != epochNumber) {
+        //if cache is being generated, sleep while we're waiting for it to finish
+        for generating_cache {
+            time.Sleep(50 * time.Millisecond)
+        }
+        
+        //if it's not the cache want, make new
+        if (get_epoch_number != epochNumber) {
+            //run newEpoch to generate new cache and set parameters to correct values
+            res := newEpoch(get_epoch_number)
+            if (res == false) {
+                json.NewEncoder(w).Encode("error: failed run newEpoch")
+                return;
+            }
         }
     }
     
@@ -237,7 +257,7 @@ func apiLightVerifyProgpow(w http.ResponseWriter, r *http.Request) {
         json_result.MixHash = fmt.Sprintf("%x", get_mix_hash)
     } else {
         //run progpow light
-        digest, mixhash := ethash.Export_progpowLight(datasetSize, cache, get_header_hash, get_nonce, epochNumber)
+        digest, mixhash := ethash.Export_progpowLight(datasetSize, cache, get_header_hash, get_nonce, epochNumber, cDag)
         
         //swap uint32 endiannesses
         for i := 0; i < len(digest); i += 4 {
@@ -288,6 +308,82 @@ func apiLightVerifyProgpow(w http.ResponseWriter, r *http.Request) {
 
 
 
+//handles GET /block_hash
+func apiBlockHash(w http.ResponseWriter, r *http.Request) {
+    //only GET is allowed
+    if (r.Method != "GET") {
+        w.WriteHeader(http.StatusMethodNotAllowed)
+        return;
+    }
+    
+    //init and read GET query values
+    var get_nonce           uint64
+    var get_header_hash     []byte
+    var get_mix_hash        []byte
+    
+    //nonce
+    get_nonce, err := strconv.ParseUint(r.URL.Query().Get("nonce"), 10, 64)
+    if err != nil {
+        json.NewEncoder(w).Encode("error: can't parse nonce")
+        return;
+    }
+    //header hash
+    get_header_hash, err2 := hex.DecodeString(r.URL.Query().Get("header_hash"))
+    if err2 != nil {
+        json.NewEncoder(w).Encode("error: can't parse header_hash")
+        return;
+    }
+    if len(get_header_hash) != 32 {
+        json.NewEncoder(w).Encode("error: header_hash must be 32 bytes length")
+        return;
+    }
+    //mix hash
+    get_mix_hash, err3 := hex.DecodeString(r.URL.Query().Get("mix_hash"))
+    if err3 != nil {
+        json.NewEncoder(w).Encode("error: can't parse mix_hash")
+        return;
+    }
+    if len(get_mix_hash) != 32 {
+        json.NewEncoder(w).Encode("error: mix_hash must be 32 bytes length")
+        return;
+    }
+    
+    //initiate json response struct as false result
+    json_result := JsonResult{Result: false, Digest: "", MixHash: "", Info: "", Block: false}
+    
+    //calculate result hash
+    result := make([]uint32, 8)
+    get_mix_hash_uint32 := make([]uint32, 8)
+    for i := uint32(0); i < 8; i++ {
+        result[i] = 0
+        get_mix_hash_uint32[i] = binary.LittleEndian.Uint32(get_mix_hash[4*i:])
+    }
+
+    res_seed := ethash.Export_keccakF800Short(get_header_hash, get_nonce, result)
+    res_digest := ethash.Export_keccakF800Long(get_header_hash, res_seed, get_mix_hash_uint32[:])
+
+    for i := 0; i < len(res_digest); i += 4 {
+		binary.BigEndian.PutUint32(res_digest[i:], binary.LittleEndian.Uint32(res_digest[i:]))
+	}
+
+    json_result.Result = true
+    json_result.Digest = fmt.Sprintf("%x", res_digest)
+    json_result.MixHash = fmt.Sprintf("%x", get_mix_hash_uint32)
+    json_result.Info = "block hash calculated from header_hash + nonce + mix_result_hash"
+    json_result.Block = true
+
+
+    //write json response struct into JSON and send to HTTP client
+    final_result, err7 := json.Marshal(&json_result)
+    if err7 == nil {
+        w.Write(final_result)
+    } else {
+        json.NewEncoder(w).Encode("error: can't encode JsonResult")
+    }  
+}
+
+
+
 func main() {
     var http_host_port      string = HTTP_HOST_PORT_DEFAULT
     //check if we have set custom port in 1st cli arg
@@ -304,14 +400,15 @@ func main() {
     }
     
     fmt.Printf("Starting ProgPoW Ethash JSON wrapper %s on http://%s  skip_mixhash_check=%t \n", VERSION_STRING, http_host_port, skip_mixhash_check)
-    
+        
     //generate first epoch
     if (newEpoch(0) != false) {
         //set HTTP paths
         http.HandleFunc("/", apiRoot)
-        http.HandleFunc("/new_epoch", apiNewEpoch)
+		http.HandleFunc("/new_epoch", apiNewEpoch)
         http.HandleFunc("/light_verify_progpow", apiLightVerifyProgpow)
-        
+        http.HandleFunc("/block_hash", apiBlockHash)
+		
         //start HTTP server
         log.Fatal(http.ListenAndServe(http_host_port, nil))
     } else {
@@ -323,6 +420,8 @@ func main() {
 
 //generates new cache for epoch_number
 func newEpoch(epoch_number uint64) bool {
+    generating_cache = true
+    
     cacheSize   = ethash.Export_cacheSize(epoch_number)
     datasetSize = ethash.Export_datasetSize(epoch_number)
     seedHash    = ethash.Export_seedHash(epoch_number)
@@ -331,9 +430,23 @@ func newEpoch(epoch_number uint64) bool {
     
     ethash.Export_generateCache(cache, epoch_number, seedHash)
     
+    keccak512 = ethash.Export_makeHasher(sha3.NewKeccak512())
+    
+    cDag = make([]uint32, progpowCacheWords)
+    rawData = ethash.Export_generateDatasetItem(cache, 0, keccak512)
+
+    for i := uint32(0); i < progpowCacheWords; i += 2 {
+        if i != 0 && 2 * i / 16 != 2 * (i - 1) / 16 {
+            rawData = ethash.Export_generateDatasetItem(cache,  2 * i / 16, keccak512)
+        }
+        cDag[i + 0] = binary.LittleEndian.Uint32(rawData[((2 * i + 0) % 16) * 4:])
+        cDag[i + 1] = binary.LittleEndian.Uint32(rawData[((2 * i + 1) % 16) * 4:])
+    }
+        
     fmt.Printf("newEpoch: Generated epoch cache. epoch_number= %v  old epochNumber= %v  cacheSize=%v  datasetSize= %v  seedHash= %x\n", epoch_number, epochNumber, cacheSize, datasetSize, seedHash)
     
     epochNumber = epoch_number
+    generating_cache = false
     return true;
 }
 

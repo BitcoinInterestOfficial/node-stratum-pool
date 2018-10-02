@@ -1,4 +1,4 @@
-// ProgPoW Ethash JSON wrapper
+// ProgPoW Ethash JSON wrapper v0.4 (2018-10-02)
 // Copyright (C) 2018  Antti Majakivi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -30,7 +30,7 @@ prior to more resource consuming light progpow verify, bad results can be discar
 early.
 
 ProgPoW fork of ZNOMP stratum-pool runs one wrapper server per thread automatically.
-This uses the compiled binary.
+ZNOMP stratum-pool uses the compiled binary by default.
 
 To use Go to run ProgPoW Ethash JSON wrapper, issue the following command:
 $ go run progpow_ethash_wrapper.go <HOSTNAME>:<PORT> <SKIP_MIXHASH_CHECK>

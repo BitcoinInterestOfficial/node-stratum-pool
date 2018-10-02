@@ -29,8 +29,10 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
+	"encoding/binary"
 
 	mmap "github.com/edsrzf/mmap-go"
 	"github.com/ethereum/go-ethereum/common"
@@ -40,16 +42,18 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/hashicorp/golang-lru/simplelru"
+	"github.com/ethereum/go-ethereum/crypto/sha3"
 )
 
 var ErrInvalidDumpMagic = errors.New("invalid dump magic")
 
 var (
-	// maxUint256 is a big integer representing 2^256-1
-	maxUint256 = new(big.Int).Exp(big.NewInt(2), big.NewInt(256), big.NewInt(0))
+	// two256 is a big integer representing 2^256
+	two256 = new(big.Int).Exp(big.NewInt(2), big.NewInt(256), big.NewInt(0))
 
 	// sharedEthash is a full instance that can be shared between multiple users.
-	sharedEthash = New(Config{"", 3, 0, "", 1, 0, ModeNormal})
+	sharedEthash *Ethash
+	ethashMu     sync.Mutex // lock for initializing sharedEthash
 
 	// algorithmRevision is the data structure version used for file naming.
 	algorithmRevision = 23
@@ -281,6 +285,7 @@ type dataset struct {
 	mmap    mmap.MMap // Memory map itself to unmap before releasing
 	dataset []uint32  // The actual cache data content
 	once    sync.Once // Ensures the cache is generated only once
+	done    uint32    // Atomic flag to determine generation status
 }
 
 // newDataset creates a new ethash mining dataset and returns it as a plain Go
@@ -292,6 +297,9 @@ func newDataset(epoch uint64) interface{} {
 // generate ensures that the dataset content is generated before use.
 func (d *dataset) generate(dir string, limit int, test bool) {
 	d.once.Do(func() {
+		// Mark the dataset generated after we're done. This is needed for remote
+		defer atomic.StoreUint32(&d.done, 1)
+
 		csize := cacheSize(d.epoch*epochLength + 1)
 		dsize := datasetSize(d.epoch*epochLength + 1)
 		seed := seedHash(d.epoch*epochLength + 1)
@@ -306,6 +314,8 @@ func (d *dataset) generate(dir string, limit int, test bool) {
 
 			d.dataset = make([]uint32, dsize/4)
 			generateDataset(d.dataset, d.epoch, cache)
+
+			return
 		}
 		// Disk storage is needed, this will get fancy
 		var endian string
@@ -348,6 +358,13 @@ func (d *dataset) generate(dir string, limit int, test bool) {
 	})
 }
 
+// generated returns whether this particular dataset finished generating already
+// or not (it may not have been started at all). This is useful for remote miners
+// to default to verification caches instead of blocking on DAG generations.
+func (d *dataset) generated() bool {
+	return atomic.LoadUint32(&d.done) == 1
+}
+
 // finalizer closes any file handlers and memory maps open.
 func (d *dataset) finalizer() {
 	if d.mmap != nil {
@@ -382,13 +399,20 @@ const (
 
 // Config are the configuration parameters of the ethash.
 type Config struct {
-	CacheDir       string
-	CachesInMem    int
-	CachesOnDisk   int
-	DatasetDir     string
-	DatasetsInMem  int
-	DatasetsOnDisk int
-	PowMode        Mode
+	CacheDir           string
+	CachesInMem        int
+	CachesOnDisk       int
+	DatasetDir         string
+	DatasetsInMem      int
+	DatasetsOnDisk     int
+	PowMode            Mode
+	ProgpowBlockNumber *big.Int // Block number at which to use progpow instead of hashimoto
+}
+
+// sealTask wraps a seal block with relative result channel for remote sealer thread.
+type sealTask struct {
+	block   *types.Block
+	results chan<- *types.Block
 }
 
 // mineResult wraps the pow solution parameters for the specified block.
@@ -430,12 +454,11 @@ type Ethash struct {
 	hashrate metrics.Meter // Meter tracking the average hashrate
 
 	// Remote sealer related fields
-	workCh       chan *types.Block // Notification channel to push new work to remote sealer
-	resultCh     chan *types.Block // Channel used by mining threads to return result
-	fetchWorkCh  chan *sealWork    // Channel used for remote sealer to fetch mining work
-	submitWorkCh chan *mineResult  // Channel used for remote sealer to submit their mining result
-	fetchRateCh  chan chan uint64  // Channel used to gather submitted hash rate for local or remote sealer.
-	submitRateCh chan *hashrate    // Channel used for remote sealer to submit their mining hashrate
+	workCh       chan *sealTask   // Notification channel to push new work and relative result channel to remote sealer
+	fetchWorkCh  chan *sealWork   // Channel used for remote sealer to fetch mining work
+	submitWorkCh chan *mineResult // Channel used for remote sealer to submit their mining result
+	fetchRateCh  chan chan uint64 // Channel used to gather submitted hash rate for local or remote sealer.
+	submitRateCh chan *hashrate   // Channel used for remote sealer to submit their mining hashrate
 
 	// The fields below are hooks for testing
 	shared    *Ethash       // Shared PoW verifier to avoid cache regeneration
@@ -447,8 +470,10 @@ type Ethash struct {
 	exitCh    chan chan error // Notification channel to exiting backend threads
 }
 
-// New creates a full sized ethash PoW scheme and starts a background thread for remote mining.
-func New(config Config) *Ethash {
+// New creates a full sized ethash PoW scheme and starts a background thread for
+// remote mining, also optionally notifying a batch of remote services of new work
+// packages.
+func New(config Config, notify []string, noverify bool) *Ethash {
 	if config.CachesInMem <= 0 {
 		log.Warn("One ethash cache must always be in memory", "requested", config.CachesInMem)
 		config.CachesInMem = 1
@@ -464,37 +489,35 @@ func New(config Config) *Ethash {
 		caches:       newlru("cache", config.CachesInMem, newCache),
 		datasets:     newlru("dataset", config.DatasetsInMem, newDataset),
 		update:       make(chan struct{}),
-		hashrate:     metrics.NewMeter(),
-		workCh:       make(chan *types.Block),
-		resultCh:     make(chan *types.Block),
+		hashrate:     nil,
+		workCh:       make(chan *sealTask),
 		fetchWorkCh:  make(chan *sealWork),
 		submitWorkCh: make(chan *mineResult),
 		fetchRateCh:  make(chan chan uint64),
 		submitRateCh: make(chan *hashrate),
 		exitCh:       make(chan chan error),
 	}
-	go ethash.remote()
+	go ethash.remote(notify, noverify)
 	return ethash
 }
 
 // NewTester creates a small sized ethash PoW scheme useful only for testing
 // purposes.
-func NewTester() *Ethash {
+func NewTester(notify []string, noverify bool) *Ethash {
 	ethash := &Ethash{
 		config:       Config{PowMode: ModeTest},
 		caches:       newlru("cache", 1, newCache),
 		datasets:     newlru("dataset", 1, newDataset),
 		update:       make(chan struct{}),
-		hashrate:     metrics.NewMeter(),
-		workCh:       make(chan *types.Block),
-		resultCh:     make(chan *types.Block),
+		hashrate:     nil,
+		workCh:       make(chan *sealTask),
 		fetchWorkCh:  make(chan *sealWork),
 		submitWorkCh: make(chan *mineResult),
 		fetchRateCh:  make(chan chan uint64),
 		submitRateCh: make(chan *hashrate),
 		exitCh:       make(chan chan error),
 	}
-	go ethash.remote()
+	go ethash.remote(notify, noverify)
 	return ethash
 }
 
@@ -545,7 +568,12 @@ func NewFullFaker() *Ethash {
 
 // NewShared creates a full sized ethash PoW shared between all requesters running
 // in the same process.
-func NewShared() *Ethash {
+func NewShared(progpowNumber *big.Int) *Ethash {
+	ethashMu.Lock()
+	if sharedEthash == nil {
+		sharedEthash = New(Config{"", 3, 0, "", 1, 0, ModeNormal, progpowNumber}, nil, false)
+	}
+	ethashMu.Unlock()
 	return &Ethash{shared: sharedEthash}
 }
 
@@ -587,20 +615,34 @@ func (ethash *Ethash) cache(block uint64) *cache {
 // dataset tries to retrieve a mining dataset for the specified block number
 // by first checking against a list of in-memory datasets, then against DAGs
 // stored on disk, and finally generating one if none can be found.
-func (ethash *Ethash) dataset(block uint64) *dataset {
+//
+// If async is specified, not only the future but the current DAG is also
+// generates on a background thread.
+func (ethash *Ethash) dataset(block uint64, async bool) *dataset {
+	// Retrieve the requested ethash dataset
 	epoch := block / epochLength
 	currentI, futureI := ethash.datasets.get(epoch)
 	current := currentI.(*dataset)
 
-	// Wait for generation finish.
-	current.generate(ethash.config.DatasetDir, ethash.config.DatasetsOnDisk, ethash.config.PowMode == ModeTest)
+	// If async is specified, generate everything in a background thread
+	if async && !current.generated() {
+		go func() {
+			current.generate(ethash.config.DatasetDir, ethash.config.DatasetsOnDisk, ethash.config.PowMode == ModeTest)
 
-	// If we need a new future dataset, now's a good time to regenerate it.
-	if futureI != nil {
-		future := futureI.(*dataset)
-		go future.generate(ethash.config.DatasetDir, ethash.config.DatasetsOnDisk, ethash.config.PowMode == ModeTest)
+			if futureI != nil {
+				future := futureI.(*dataset)
+				future.generate(ethash.config.DatasetDir, ethash.config.DatasetsOnDisk, ethash.config.PowMode == ModeTest)
+			}
+		}()
+	} else {
+		// Either blocking generation was requested, or already done
+		current.generate(ethash.config.DatasetDir, ethash.config.DatasetsOnDisk, ethash.config.PowMode == ModeTest)
+
+		if futureI != nil {
+			future := futureI.(*dataset)
+			go future.generate(ethash.config.DatasetDir, ethash.config.DatasetsOnDisk, ethash.config.PowMode == ModeTest)
+		}
 	}
-
 	return current
 }
 
@@ -681,4 +723,43 @@ func (ethash *Ethash) APIs(chain consensus.ChainReader) []rpc.API {
 // dataset.
 func SeedHash(block uint64) []byte {
 	return seedHash(block)
+}
+
+type powFull func(dataset []uint32, hash []byte, nonce, number uint64) ([]byte, []byte)
+type powLight func(size uint64, cache []uint32, hash []byte, nonce, number uint64) ([]byte, []byte)
+
+// fullPow returns either hashimoto or progpow full checker depending on number
+func (ethash *Ethash) fullPow(number *big.Int) powFull {
+	if progpowNumber := ethash.config.ProgpowBlockNumber; progpowNumber != nil && progpowNumber.Cmp(number) >= 0 {
+		return progpowFull
+	}
+	return func(dataset []uint32, hash []byte, nonce uint64, number uint64) ([]byte, []byte) {
+		return hashimotoFull(dataset, hash, nonce)
+	}
+}
+
+// lightPow returns either hashimoto or progpowdepending on number
+func (ethash *Ethash) lightPow(number *big.Int) powLight {
+	if progpowNumber := ethash.config.ProgpowBlockNumber; progpowNumber != nil && progpowNumber.Cmp(number) >= 0 {
+		return func(size uint64, cache []uint32, hash []byte, nonce uint64, blockNumber uint64) ([]byte, []byte) {
+			// TODO: cDag should be generated once per epoch for a significant performance gain
+
+			keccak512 := makeHasher(sha3.NewKeccak512())
+			cDag := make([]uint32, progpowCacheWords)
+			rawData := generateDatasetItem(cache, 0, keccak512)
+
+			for i := uint32(0); i < progpowCacheWords; i += 2 {
+				if i != 0 && 2 * i / 16 != 2 * (i - 1) / 16 {
+					rawData = generateDatasetItem(cache,  2 * i / 16, keccak512)
+				}
+				cDag[i + 0] = binary.LittleEndian.Uint32(rawData[((2 * i + 0) % 16) * 4:])
+				cDag[i + 1] = binary.LittleEndian.Uint32(rawData[((2 * i + 1) % 16) * 4:])
+			}
+
+			return progpowLight(size, cache, hash, nonce, blockNumber, cDag)
+		}
+	}
+	return func(size uint64, cache []uint32, hash []byte, nonce uint64, blockNumber uint64) ([]byte, []byte) {
+		return hashimotoLight(size, cache, hash, nonce)
+	}
 }
